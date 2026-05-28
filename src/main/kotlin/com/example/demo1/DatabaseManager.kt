@@ -5,12 +5,13 @@ import io.ktor.client.engine.cio.*
 import io.ktor.client.request.*
 import io.ktor.client.statement.*
 import kotlinx.serialization.json.Json
+import java.sql.Connection
+import java.sql.DriverManager
 
-// Модель данных пользователя
 data class User(
     val login: String,
     var password: String,
-    val role: String,         // "ADMIN" или "USER"
+    val role: String,
     var blocked: Boolean = false,
     var failedAttempts: Int = 0
 )
@@ -18,85 +19,134 @@ data class User(
 object DatabaseManager {
     private val client = HttpClient(CIO)
 
-    // === ДАННЫЕ-ЗАТЫЧКИ (Имитация базы данных в оперативной памяти) ===
-    private val users = mutableListOf(
-        User("admin", "admin123", "ADMIN"),
-        User("user1", "pass1", "USER"),
-        User("user2", "pass2", "USER", blocked = true) // Сразу заблокированный для теста
-    )
+    // === НАСТРОЙКИ OPEN SERVER PANEL ===
+    // allowPublicKeyRetrieval=true нужен для корректной работы с OSPanel
+    private const val DB_URL = "jdbc:mysql://127.0.0.1:3306/mydb?useSSL=false&serverTimezone=UTC&allowPublicKeyRetrieval=true"
+    private const val DB_USER = "root"
+    private const val DB_PASSWORD = ""
+    // Или "root", если с пустым не пускает
+    // ВНИМАНИЕ: В Open Server Panel пароль по умолчанию часто ПУСТОЙ ("") или "root".
+    // Если не подключается - поменяйте "" на "root"
 
-    // Возвращает список всех пользователей для админки
+
+    private fun getConnection(): Connection {
+        return DriverManager.getConnection(DB_URL, DB_USER, DB_PASSWORD)
+    }
+
+    // === CRUD ОПЕРАЦИИ С БАЗОЙ ДАННЫХ ===
+
     fun getAllUsers(): List<User> {
-        return users.toList()
+        val list = mutableListOf<User>()
+        try {
+            getConnection().use { conn ->
+                conn.prepareStatement("SELECT * FROM users").use { stmt ->
+                    val rs = stmt.executeQuery()
+                    while (rs.next()) {
+                        list.add(User(rs.getString("login"), rs.getString("password"), rs.getString("role"), rs.getBoolean("blocked"), rs.getInt("failed_attempts")))
+                    }
+                }
+            }
+        } catch (e: Exception) { e.printStackTrace() }
+        return list
     }
 
-    // Поиск пользователя по логину
     fun findUser(login: String): User? {
-        return users.find { it.login.equals(login, ignoreCase = true) }
+        try {
+            getConnection().use { conn ->
+                conn.prepareStatement("SELECT * FROM users WHERE login = ?").use { stmt ->
+                    stmt.setString(1, login)
+                    val rs = stmt.executeQuery()
+                    if (rs.next()) return User(rs.getString("login"), rs.getString("password"), rs.getString("role"), rs.getBoolean("blocked"), rs.getInt("failed_attempts"))
+                }
+            }
+        } catch (e: Exception) { e.printStackTrace() }
+        return null
     }
 
-    // Проверка логина и пароля при авторизации
     fun authenticate(login: String, password: String): User? {
         val user = findUser(login)
         return if (user != null && user.password == password) user else null
     }
 
-    // Добавление нового пользователя через панель администратора
     fun addUser(login: String, password: String, role: String): Boolean {
+        // Проверка: логин и пароль не пустые, и такого пользователя еще нет (Требование Модуля 4)
         if (login.isBlank() || password.isBlank() || findUser(login) != null) return false
-        users.add(User(login, password, role))
-        return true
+        return try {
+            getConnection().use { conn ->
+                conn.prepareStatement("INSERT INTO users (login, password, role, blocked, failed_attempts) VALUES (?, ?, ?, FALSE, 0)").use { stmt ->
+                    stmt.setString(1, login)
+                    stmt.setString(2, password)
+                    stmt.setString(3, role)
+                    stmt.executeUpdate() > 0
+                }
+            }
+        } catch (e: Exception) { false }
     }
 
-    // Обновление данных (пароля или статуса блокировки)
     fun updateUser(login: String, update: (User) -> Unit) {
         val user = findUser(login) ?: return
         update(user)
+        try {
+            getConnection().use { conn ->
+                conn.prepareStatement("UPDATE users SET password = ?, blocked = ?, failed_attempts = ? WHERE login = ?").use { stmt ->
+                    stmt.setString(1, user.password)
+                    stmt.setBoolean(2, user.blocked)
+                    stmt.setInt(3, user.failedAttempts)
+                    stmt.setString(4, user.login)
+                    stmt.executeUpdate()
+                }
+            }
+        } catch (e: Exception) { e.printStackTrace() }
     }
 
-    // Логика обработки неудачной попытки входа (блокировка на 3-й раз)
+    // Увеличиваем счетчик ошибок. Блокируем, если ошибок 3 или больше.
     fun handleFailedAttempt(login: String) {
         val user = findUser(login) ?: return
-        user.failedAttempts += 1
-        if (user.failedAttempts >= 3) {
-            user.blocked = true
-        }
+        val newAttempts = user.failedAttempts + 1
+        try {
+            getConnection().use { conn ->
+                conn.prepareStatement("UPDATE users SET failed_attempts = ?, blocked = ? WHERE login = ?").use { stmt ->
+                    stmt.setInt(1, newAttempts)
+                    stmt.setBoolean(2, newAttempts >= 3 || user.blocked)
+                    stmt.setString(3, login)
+                    stmt.executeUpdate()
+                }
+            }
+        } catch (e: Exception) { e.printStackTrace() }
     }
 
-    // Сброс счетчика ошибок при успешном входе и прохождении капчи
+    // Сбрасываем счетчик при успешном входе
     fun resetFailedAttempts(login: String) {
-        findUser(login)?.let { it.failedAttempts = 0 }
+        try {
+            getConnection().use { conn ->
+                conn.prepareStatement("UPDATE users SET failed_attempts = 0 WHERE login = ?").use { stmt ->
+                    stmt.setString(1, login)
+                    stmt.executeUpdate()
+                }
+            }
+        } catch (e: Exception) { e.printStackTrace() }
     }
 
-    // Удаление пользователя из списка в админке
     fun deleteUser(login: String) {
-        users.removeIf { it.login.equals(login, ignoreCase = true) }
+        try {
+            getConnection().use { conn ->
+                conn.prepareStatement("DELETE FROM users WHERE login = ?").use { stmt ->
+                    stmt.setString(1, login)
+                    stmt.executeUpdate()
+                }
+            }
+        } catch (e: Exception) { e.printStackTrace() }
     }
 
-    /**
-     * МОДУЛЬ 6: Безопасный запрос к API симулятора.
-     * Защищает от падения (ошибки 500), если сервер шлет текст вместо JSON,
-     * и очищает строковые ответы от мусора (% и &).
-     */
+    // === СЕТЕВЫЕ ЗАПРОСЫ (МОДУЛЬ 6) ===
     private suspend fun safeApiRequest(endpoint: String): String {
         return try {
-            val response: HttpResponse = client.get("${ApiConfig.baseUrl}/$endpoint")
-            val rawBody = response.bodyAsText().trim()
-
-            // Если пришел JSON-объект — парсим, иначе работаем как с чистым текстом
-            val cleanText = if (rawBody.startsWith("{") && rawBody.endsWith("}")) {
-                Json.decodeFromString<ApiResponse>(rawBody).value
-            } else {
-                rawBody
-            }
-            // Очистка от спецсимволов % и & по ТЗ
-            cleanText.replace("%", "").replace("&", " ").trim()
-        } catch (e: Exception) {
-            "Ошибка сервера"
-        }
+            val raw = client.get("${ApiConfig.baseUrl}/$endpoint").bodyAsText().trim()
+            val text = if (raw.startsWith("{") && raw.endsWith("}")) Json.decodeFromString<ApiResponse>(raw).value else raw
+            text.replace("%", "").replace("&", " ").trim()
+        } catch (e: Exception) { "Ошибка сервера" }
     }
 
-    // Методы интеграции с API
     suspend fun fetchFullName() = safeApiRequest("fullName")
     suspend fun fetchSnils() = safeApiRequest("snils")
     suspend fun fetchInn() = safeApiRequest("inn")

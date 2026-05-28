@@ -42,6 +42,9 @@ dependencies {
     implementation("io.ktor:ktor-client-core:2.3.7")
     implementation("io.ktor:ktor-client-cio:2.3.7")
 
+    // Движок для работы с базой данных MySQL
+    implementation("mysql:mysql-connector-java:8.0.33")
+
     // Сериализация JSON (исправляет ошибку в ApiConfig.kt)
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.6.2")
 

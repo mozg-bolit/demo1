@@ -5,6 +5,7 @@ import javafx.scene.Scene
 import javafx.scene.layout.StackPane
 import javafx.stage.Stage
 
+
 class MainApp : Application() {
     // Корневой слой, на котором мы будем сменять экраны
     private val rootPane = StackPane()
